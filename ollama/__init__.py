@@ -14,7 +14,21 @@ from ollama._types import (
   ResponseError,
   ShowResponse,
   StatusResponse,
+  SystemOneAnswer,
+  SystemOneChoiceAnswer,
+  SystemOneChoiceQuestion,
+  SystemOneContent,
+  SystemOneNoulAnswer,
+  SystemOneNoulQuestion,
+  SystemOneQuestion,
+  SystemOneRequest,
+  SystemOneResponse,
+  SystemOneScoreAnswer,
+  SystemOneScoreQuestion,
+  SystemOneUsage,
   Tool,
+  WebFetchResponse,
+  WebSearchResponse,
 )
 
 __all__ = [
@@ -34,7 +48,21 @@ __all__ = [
   'ResponseError',
   'ShowResponse',
   'StatusResponse',
+  'SystemOneAnswer',
+  'SystemOneChoiceAnswer',
+  'SystemOneChoiceQuestion',
+  'SystemOneContent',
+  'SystemOneNoulAnswer',
+  'SystemOneNoulQuestion',
+  'SystemOneQuestion',
+  'SystemOneRequest',
+  'SystemOneResponse',
+  'SystemOneScoreAnswer',
+  'SystemOneScoreQuestion',
+  'SystemOneUsage',
   'Tool',
+  'WebFetchResponse',
+  'WebSearchResponse',
 ]
 
 _client = Client()
@@ -51,3 +79,6 @@ list = _client.list
 copy = _client.copy
 show = _client.show
 ps = _client.ps
+web_search = _client.web_search
+web_fetch = _client.web_fetch
+systemone = _client.systemone

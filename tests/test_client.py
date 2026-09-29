@@ -1,4 +1,5 @@
 import base64
+import inspect
 import json
 import os
 import re
@@ -59,6 +60,44 @@ def test_client_chat(httpserver: HTTPServer):
   assert response['model'] == 'dummy'
   assert response['message']['role'] == 'assistant'
   assert response['message']['content'] == "I don't know."
+
+
+def test_client_chat_with_logprobs(httpserver: HTTPServer):
+  httpserver.expect_ordered_request(
+    '/api/chat',
+    method='POST',
+    json={
+      'model': 'dummy',
+      'messages': [{'role': 'user', 'content': 'Hi'}],
+      'tools': [],
+      'stream': False,
+      'logprobs': True,
+      'top_logprobs': 3,
+    },
+  ).respond_with_json(
+    {
+      'model': 'dummy',
+      'message': {
+        'role': 'assistant',
+        'content': 'Hello',
+      },
+      'logprobs': [
+        {
+          'token': 'Hello',
+          'logprob': -0.1,
+          'top_logprobs': [
+            {'token': 'Hello', 'logprob': -0.1},
+            {'token': 'Hi', 'logprob': -1.0},
+          ],
+        }
+      ],
+    }
+  )
+
+  client = Client(httpserver.url_for('/'))
+  response = client.chat('dummy', messages=[{'role': 'user', 'content': 'Hi'}], logprobs=True, top_logprobs=3)
+  assert response['logprobs'][0]['token'] == 'Hello'
+  assert response['logprobs'][0]['top_logprobs'][1]['token'] == 'Hi'
 
 
 def test_client_chat_stream(httpserver: HTTPServer):
@@ -294,6 +333,40 @@ def test_client_generate(httpserver: HTTPServer):
   assert response['response'] == 'Because it is.'
 
 
+def test_client_generate_with_logprobs(httpserver: HTTPServer):
+  httpserver.expect_ordered_request(
+    '/api/generate',
+    method='POST',
+    json={
+      'model': 'dummy',
+      'prompt': 'Why',
+      'stream': False,
+      'logprobs': True,
+      'top_logprobs': 2,
+    },
+  ).respond_with_json(
+    {
+      'model': 'dummy',
+      'response': 'Hello',
+      'logprobs': [
+        {
+          'token': 'Hello',
+          'logprob': -0.2,
+          'top_logprobs': [
+            {'token': 'Hello', 'logprob': -0.2},
+            {'token': 'Hi', 'logprob': -1.5},
+          ],
+        }
+      ],
+    }
+  )
+
+  client = Client(httpserver.url_for('/'))
+  response = client.generate('dummy', 'Why', logprobs=True, top_logprobs=2)
+  assert response['logprobs'][0]['token'] == 'Hello'
+  assert response['logprobs'][0]['top_logprobs'][1]['token'] == 'Hi'
+
+
 def test_client_generate_with_image_type(httpserver: HTTPServer):
   httpserver.expect_ordered_request(
     '/api/generate',
@@ -494,6 +567,115 @@ async def test_async_client_generate_format_pydantic(httpserver: HTTPServer):
   response = await client.generate('dummy', 'Why is the sky blue?', format=ResponseFormat.model_json_schema())
   assert response['model'] == 'dummy'
   assert response['response'] == '{"answer": "Because of Rayleigh scattering", "confidence": 0.95}'
+
+
+def test_client_generate_image(httpserver: HTTPServer):
+  httpserver.expect_ordered_request(
+    '/api/generate',
+    method='POST',
+    json={
+      'model': 'dummy-image',
+      'prompt': 'a sunset over mountains',
+      'stream': False,
+      'width': 1024,
+      'height': 768,
+      'steps': 20,
+    },
+  ).respond_with_json(
+    {
+      'model': 'dummy-image',
+      'image': PNG_BASE64,
+      'done': True,
+      'done_reason': 'stop',
+    }
+  )
+
+  client = Client(httpserver.url_for('/'))
+  response = client.generate('dummy-image', 'a sunset over mountains', width=1024, height=768, steps=20)
+  assert response['model'] == 'dummy-image'
+  assert response['image'] == PNG_BASE64
+  assert response['done'] is True
+
+
+def test_client_generate_image_stream(httpserver: HTTPServer):
+  def stream_handler(_: Request):
+    def generate():
+      # Progress updates
+      for i in range(1, 4):
+        yield (
+          json.dumps(
+            {
+              'model': 'dummy-image',
+              'completed': i,
+              'total': 3,
+              'done': False,
+            }
+          )
+          + '\n'
+        )
+      # Final response with image
+      yield (
+        json.dumps(
+          {
+            'model': 'dummy-image',
+            'image': PNG_BASE64,
+            'done': True,
+            'done_reason': 'stop',
+          }
+        )
+        + '\n'
+      )
+
+    return Response(generate())
+
+  httpserver.expect_ordered_request(
+    '/api/generate',
+    method='POST',
+    json={
+      'model': 'dummy-image',
+      'prompt': 'a sunset over mountains',
+      'stream': True,
+      'width': 512,
+      'height': 512,
+    },
+  ).respond_with_handler(stream_handler)
+
+  client = Client(httpserver.url_for('/'))
+  response = client.generate('dummy-image', 'a sunset over mountains', stream=True, width=512, height=512)
+
+  parts = list(response)
+  # Check progress updates
+  assert parts[0]['completed'] == 1
+  assert parts[0]['total'] == 3
+  assert parts[0]['done'] is False
+  # Check final response
+  assert parts[-1]['image'] == PNG_BASE64
+  assert parts[-1]['done'] is True
+
+
+async def test_async_client_generate_image(httpserver: HTTPServer):
+  httpserver.expect_ordered_request(
+    '/api/generate',
+    method='POST',
+    json={
+      'model': 'dummy-image',
+      'prompt': 'a robot painting',
+      'stream': False,
+      'width': 1024,
+      'height': 1024,
+    },
+  ).respond_with_json(
+    {
+      'model': 'dummy-image',
+      'image': PNG_BASE64,
+      'done': True,
+    }
+  )
+
+  client = AsyncClient(httpserver.url_for('/'))
+  response = await client.generate('dummy-image', 'a robot painting', width=1024, height=1024)
+  assert response['model'] == 'dummy-image'
+  assert response['image'] == PNG_BASE64
 
 
 def test_client_pull(httpserver: HTTPServer):
@@ -1195,3 +1377,153 @@ async def test_arbitrary_roles_accepted_in_message_request_async(monkeypatch: py
   client = AsyncClient()
 
   await client.chat(model='llama3.1', messages=[{'role': 'somerandomrole', 'content': "I'm ok with you adding any role message now!"}, {'role': 'user', 'content': 'Hello world!'}])
+
+
+def test_client_web_search_requires_bearer_auth_header(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+
+  client = Client()
+
+  with pytest.raises(ValueError, match='Authorization header with Bearer token is required for web search'):
+    client.web_search('test query')
+
+
+def test_client_web_fetch_requires_bearer_auth_header(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+
+  client = Client()
+
+  with pytest.raises(ValueError, match='Authorization header with Bearer token is required for web fetch'):
+    client.web_fetch('https://example.com')
+
+
+def _mock_request_web_search(self, cls, method, url, json=None, **kwargs):
+  assert method == 'POST'
+  assert url == 'https://ollama.com/api/web_search'
+  assert json is not None and 'query' in json and 'max_results' in json
+  return httpxResponse(status_code=200, content='{"results": {}, "success": true}')
+
+
+def _mock_request_web_fetch(self, cls, method, url, json=None, **kwargs):
+  assert method == 'POST'
+  assert url == 'https://ollama.com/api/web_fetch'
+  assert json is not None and 'url' in json
+  return httpxResponse(status_code=200, content='{"results": {}, "success": true}')
+
+
+def test_client_web_search_with_env_api_key(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv('OLLAMA_API_KEY', 'test-key')
+  monkeypatch.setattr(Client, '_request', _mock_request_web_search)
+
+  client = Client()
+  client.web_search('what is ollama?', max_results=2)
+
+
+def test_client_web_fetch_with_env_api_key(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv('OLLAMA_API_KEY', 'test-key')
+  monkeypatch.setattr(Client, '_request', _mock_request_web_fetch)
+
+  client = Client()
+  client.web_fetch('https://example.com')
+
+
+def test_client_web_search_with_explicit_bearer_header(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+  monkeypatch.setattr(Client, '_request', _mock_request_web_search)
+
+  client = Client(headers={'Authorization': 'Bearer custom-token'})
+  client.web_search('what is ollama?', max_results=1)
+
+
+def test_client_web_fetch_with_explicit_bearer_header(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.delenv('OLLAMA_API_KEY', raising=False)
+  monkeypatch.setattr(Client, '_request', _mock_request_web_fetch)
+
+  client = Client(headers={'Authorization': 'Bearer custom-token'})
+  client.web_fetch('https://example.com')
+
+
+def test_client_bearer_header_from_env(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv('OLLAMA_API_KEY', 'env-token')
+
+  client = Client()
+  assert client._client.headers['authorization'] == 'Bearer env-token'
+
+
+def test_client_explicit_bearer_header_overrides_env(monkeypatch: pytest.MonkeyPatch):
+  monkeypatch.setenv('OLLAMA_API_KEY', 'env-token')
+  monkeypatch.setattr(Client, '_request', _mock_request_web_search)
+
+  client = Client(headers={'Authorization': 'Bearer explicit-token'})
+  assert client._client.headers['authorization'] == 'Bearer explicit-token'
+  client.web_search('override check')
+
+
+def test_client_close():
+  client = Client()
+  client.close()
+  assert client._client.is_closed
+
+
+@pytest.mark.anyio
+async def test_async_client_close():
+  client = AsyncClient()
+  await client.close()
+  assert client._client.is_closed
+
+
+def test_client_context_manager():
+  with Client() as client:
+    assert isinstance(client, Client)
+    assert not client._client.is_closed
+
+  assert client._client.is_closed
+
+
+@pytest.mark.anyio
+async def test_async_client_context_manager():
+  async with AsyncClient() as client:
+    assert isinstance(client, AsyncClient)
+    assert not client._client.is_closed
+
+  assert client._client.is_closed
+
+
+def test_generate_think_annotation_matches_chat():
+  # The `think` parameter accepts bool or string thinking levels (e.g. 'low', 'medium', 'high', 'xhigh', 'max').
+  # Client.generate must keep the same annotation as Client.chat,
+  # AsyncClient.chat, and AsyncClient.generate so passing a string level does not
+  # raise a false type error (regression guard for the sync generate overloads/implementation).
+  expected = inspect.signature(Client.chat).parameters['think'].annotation
+  assert inspect.signature(Client.generate).parameters['think'].annotation == expected
+  assert inspect.signature(AsyncClient.chat).parameters['think'].annotation == expected
+  assert inspect.signature(AsyncClient.generate).parameters['think'].annotation == expected
+
+
+def test_client_chat_with_think_level(httpserver: HTTPServer):
+  httpserver.expect_ordered_request(
+    '/api/chat',
+    method='POST',
+    json={
+      'model': 'qwen3.8:27b',
+      'messages': [{'role': 'user', 'content': 'Hello'}],
+      'tools': [],
+      'stream': False,
+      'think': 'xhigh',
+    },
+  ).respond_with_json(
+    {
+      'model': 'qwen3.8:27b',
+      'message': {
+        'role': 'assistant',
+        'content': 'Hi there.',
+        'thinking': 'Thinking deeply...',
+      },
+    }
+  )
+
+  client = Client(httpserver.url_for('/'))
+  response = client.chat('qwen3.8:27b', messages=[{'role': 'user', 'content': 'Hello'}], think='xhigh')
+  assert response['model'] == 'qwen3.8:27b'
+  assert response['message']['content'] == 'Hi there.'
+  assert response['message']['thinking'] == 'Thinking deeply...'

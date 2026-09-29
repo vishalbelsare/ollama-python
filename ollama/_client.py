@@ -1,3 +1,4 @@
+import contextlib
 import ipaddress
 import json
 import os
@@ -65,13 +66,21 @@ from ollama._types import (
   ShowRequest,
   ShowResponse,
   StatusResponse,
+  SystemOneContent,
+  SystemOneQuestion,
+  SystemOneRequest,
+  SystemOneResponse,
   Tool,
+  WebFetchRequest,
+  WebFetchResponse,
+  WebSearchRequest,
+  WebSearchResponse,
 )
 
 T = TypeVar('T')
 
 
-class BaseClient:
+class BaseClient(contextlib.AbstractContextManager, contextlib.AbstractAsyncContextManager):
   def __init__(
     self,
     client,
@@ -90,22 +99,33 @@ class BaseClient:
     `kwargs` are passed to the httpx client.
     """
 
+    headers = {
+      k.lower(): v
+      for k, v in {
+        **(headers or {}),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': f'ollama-python/{__version__} ({platform.machine()} {platform.system().lower()}) Python/{platform.python_version()}',
+      }.items()
+      if v is not None
+    }
+    api_key = os.getenv('OLLAMA_API_KEY', None)
+    if not headers.get('authorization') and api_key:
+      headers['authorization'] = f'Bearer {api_key}'
+
     self._client = client(
       base_url=_parse_host(host or os.getenv('OLLAMA_HOST')),
       follow_redirects=follow_redirects,
       timeout=timeout,
-      # Lowercase all headers to ensure override
-      headers={
-        k.lower(): v
-        for k, v in {
-          **(headers or {}),
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': f'ollama-python/{__version__} ({platform.machine()} {platform.system().lower()}) Python/{platform.python_version()}',
-        }.items()
-      },
+      headers=headers,
       **kwargs,
     )
+
+  def __exit__(self, exc_type, exc_val, exc_tb):
+    self.close()
+
+  async def __aexit__(self, exc_type, exc_val, exc_tb):
+    await self.close()
 
 
 CONNECTION_ERROR_MESSAGE = 'Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download'
@@ -114,6 +134,9 @@ CONNECTION_ERROR_MESSAGE = 'Failed to connect to Ollama. Please check that Ollam
 class Client(BaseClient):
   def __init__(self, host: Optional[str] = None, **kwargs) -> None:
     super().__init__(httpx.Client, host, **kwargs)
+
+  def close(self):
+    self._client.close()
 
   def _request_raw(self, *args, **kwargs):
     try:
@@ -190,12 +213,17 @@ class Client(BaseClient):
     template: str = '',
     context: Optional[Sequence[int]] = None,
     stream: Literal[False] = False,
-    think: Optional[bool] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: bool = False,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> GenerateResponse: ...
 
   @overload
@@ -209,12 +237,17 @@ class Client(BaseClient):
     template: str = '',
     context: Optional[Sequence[int]] = None,
     stream: Literal[True] = True,
-    think: Optional[bool] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: bool = False,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> Iterator[GenerateResponse]: ...
 
   def generate(
@@ -227,12 +260,17 @@ class Client(BaseClient):
     template: Optional[str] = None,
     context: Optional[Sequence[int]] = None,
     stream: bool = False,
-    think: Optional[bool] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: Optional[bool] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> Union[GenerateResponse, Iterator[GenerateResponse]]:
     """
     Create a response using the requested model.
@@ -257,11 +295,16 @@ class Client(BaseClient):
         context=context,
         stream=stream,
         think=think,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         raw=raw,
         format=format,
         images=list(_copy_images(images)) if images else None,
         options=options,
         keep_alive=keep_alive,
+        width=width,
+        height=height,
+        steps=steps,
       ).model_dump(exclude_none=True),
       stream=stream,
     )
@@ -274,7 +317,9 @@ class Client(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: Literal[False] = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -288,7 +333,9 @@ class Client(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: Literal[True] = True,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -301,7 +348,9 @@ class Client(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: bool = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -349,11 +398,36 @@ class Client(BaseClient):
         tools=list(_copy_tools(tools)),
         stream=stream,
         think=think,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         format=format,
         options=options,
         keep_alive=keep_alive,
       ).model_dump(exclude_none=True),
       stream=stream,
+    )
+
+  def systemone(
+    self,
+    model: str,
+    state: SystemOneContent,
+    questions: Mapping[str, Union[SystemOneQuestion, Mapping[str, Any]]],
+    keep_alive: Optional[Union[float, str]] = None,
+  ) -> SystemOneResponse:
+    """Score choice, noul, and score questions with a local System One model.
+
+    Returns one JSON response. Streaming is not supported.
+    """
+    return self._request(
+      SystemOneResponse,
+      'POST',
+      '/v1/systemone',
+      json=SystemOneRequest(
+        model=model,
+        state=state,
+        questions=questions,
+        keep_alive=keep_alive,
+      ).model_dump(exclude_none=True),
     )
 
   def embed(
@@ -363,6 +437,7 @@ class Client(BaseClient):
     truncate: Optional[bool] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    dimensions: Optional[int] = None,
   ) -> EmbedResponse:
     return self._request(
       EmbedResponse,
@@ -374,6 +449,7 @@ class Client(BaseClient):
         truncate=truncate,
         options=options,
         keep_alive=keep_alive,
+        dimensions=dimensions,
       ).model_dump(exclude_none=True),
     )
 
@@ -622,10 +698,61 @@ class Client(BaseClient):
       '/api/ps',
     )
 
+  def web_search(self, query: str, max_results: int = 3) -> WebSearchResponse:
+    """
+    Performs a web search
+
+    Args:
+      query: The query to search for
+      max_results: The maximum number of results to return (default: 3)
+
+    Returns:
+      WebSearchResponse with the search results
+    Raises:
+      ValueError: If OLLAMA_API_KEY environment variable is not set
+    """
+    if not self._client.headers.get('authorization', '').startswith('Bearer '):
+      raise ValueError('Authorization header with Bearer token is required for web search')
+
+    return self._request(
+      WebSearchResponse,
+      'POST',
+      'https://ollama.com/api/web_search',
+      json=WebSearchRequest(
+        query=query,
+        max_results=max_results,
+      ).model_dump(exclude_none=True),
+    )
+
+  def web_fetch(self, url: str) -> WebFetchResponse:
+    """
+    Fetches the content of a web page for the provided URL.
+
+    Args:
+      url: The URL to fetch
+
+    Returns:
+      WebFetchResponse with the fetched result
+    """
+    if not self._client.headers.get('authorization', '').startswith('Bearer '):
+      raise ValueError('Authorization header with Bearer token is required for web fetch')
+
+    return self._request(
+      WebFetchResponse,
+      'POST',
+      'https://ollama.com/api/web_fetch',
+      json=WebFetchRequest(
+        url=url,
+      ).model_dump(exclude_none=True),
+    )
+
 
 class AsyncClient(BaseClient):
   def __init__(self, host: Optional[str] = None, **kwargs) -> None:
     super().__init__(httpx.AsyncClient, host, **kwargs)
+
+  async def close(self):
+    await self._client.aclose()
 
   async def _request_raw(self, *args, **kwargs):
     try:
@@ -691,6 +818,46 @@ class AsyncClient(BaseClient):
 
     return cls(**(await self._request_raw(*args, **kwargs)).json())
 
+  async def web_search(self, query: str, max_results: int = 3) -> WebSearchResponse:
+    """
+    Performs a web search
+
+    Args:
+      query: The query to search for
+      max_results: The maximum number of results to return (default: 3)
+
+    Returns:
+      WebSearchResponse with the search results
+    """
+    return await self._request(
+      WebSearchResponse,
+      'POST',
+      'https://ollama.com/api/web_search',
+      json=WebSearchRequest(
+        query=query,
+        max_results=max_results,
+      ).model_dump(exclude_none=True),
+    )
+
+  async def web_fetch(self, url: str) -> WebFetchResponse:
+    """
+    Fetches the content of a web page for the provided URL.
+
+    Args:
+      url: The URL to fetch
+
+    Returns:
+      WebFetchResponse with the fetched result
+    """
+    return await self._request(
+      WebFetchResponse,
+      'POST',
+      'https://ollama.com/api/web_fetch',
+      json=WebFetchRequest(
+        url=url,
+      ).model_dump(exclude_none=True),
+    )
+
   @overload
   async def generate(
     self,
@@ -702,12 +869,17 @@ class AsyncClient(BaseClient):
     template: str = '',
     context: Optional[Sequence[int]] = None,
     stream: Literal[False] = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: bool = False,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> GenerateResponse: ...
 
   @overload
@@ -721,12 +893,17 @@ class AsyncClient(BaseClient):
     template: str = '',
     context: Optional[Sequence[int]] = None,
     stream: Literal[True] = True,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: bool = False,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> AsyncIterator[GenerateResponse]: ...
 
   async def generate(
@@ -739,12 +916,17 @@ class AsyncClient(BaseClient):
     template: Optional[str] = None,
     context: Optional[Sequence[int]] = None,
     stream: bool = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     raw: Optional[bool] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     images: Optional[Sequence[Union[str, bytes, Image]]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
   ) -> Union[GenerateResponse, AsyncIterator[GenerateResponse]]:
     """
     Create a response using the requested model.
@@ -768,11 +950,16 @@ class AsyncClient(BaseClient):
         context=context,
         stream=stream,
         think=think,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         raw=raw,
         format=format,
         images=list(_copy_images(images)) if images else None,
         options=options,
         keep_alive=keep_alive,
+        width=width,
+        height=height,
+        steps=steps,
       ).model_dump(exclude_none=True),
       stream=stream,
     )
@@ -785,7 +972,9 @@ class AsyncClient(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: Literal[False] = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -799,7 +988,9 @@ class AsyncClient(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: Literal[True] = True,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -812,7 +1003,9 @@ class AsyncClient(BaseClient):
     *,
     tools: Optional[Sequence[Union[Mapping[str, Any], Tool, Callable]]] = None,
     stream: bool = False,
-    think: Optional[Union[bool, Literal['low', 'medium', 'high']]] = None,
+    think: Optional[Union[bool, str]] = None,
+    logprobs: Optional[bool] = None,
+    top_logprobs: Optional[int] = None,
     format: Optional[Union[Literal['', 'json'], JsonSchemaValue]] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
@@ -861,11 +1054,36 @@ class AsyncClient(BaseClient):
         tools=list(_copy_tools(tools)),
         stream=stream,
         think=think,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
         format=format,
         options=options,
         keep_alive=keep_alive,
       ).model_dump(exclude_none=True),
       stream=stream,
+    )
+
+  async def systemone(
+    self,
+    model: str,
+    state: SystemOneContent,
+    questions: Mapping[str, Union[SystemOneQuestion, Mapping[str, Any]]],
+    keep_alive: Optional[Union[float, str]] = None,
+  ) -> SystemOneResponse:
+    """Score choice, noul, and score questions with a local System One model.
+
+    Returns one JSON response. Streaming is not supported.
+    """
+    return await self._request(
+      SystemOneResponse,
+      'POST',
+      '/v1/systemone',
+      json=SystemOneRequest(
+        model=model,
+        state=state,
+        questions=questions,
+        keep_alive=keep_alive,
+      ).model_dump(exclude_none=True),
     )
 
   async def embed(
@@ -875,6 +1093,7 @@ class AsyncClient(BaseClient):
     truncate: Optional[bool] = None,
     options: Optional[Union[Mapping[str, Any], Options]] = None,
     keep_alive: Optional[Union[float, str]] = None,
+    dimensions: Optional[int] = None,
   ) -> EmbedResponse:
     return await self._request(
       EmbedResponse,
@@ -886,6 +1105,7 @@ class AsyncClient(BaseClient):
         truncate=truncate,
         options=options,
         keep_alive=keep_alive,
+        dimensions=dimensions,
       ).model_dump(exclude_none=True),
     )
 
